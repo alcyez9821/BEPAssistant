@@ -108,8 +108,16 @@ class CheckService : LifecycleService() {
         NotificationHelper.createChannel(this)
         val fgNotification = NotificationHelper.buildNotification(this, "进京证助手", "正在执行定时检查...")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForeground(1003, fgNotification)
-            Log.i(TAG, "[onStartCommand] startForeground 1003")
+            try {
+                startForeground(NotificationHelper.FOREGROUND_ID_SERVICE, fgNotification)
+                Log.i(TAG, "[onStartCommand] startForeground ${NotificationHelper.FOREGROUND_ID_SERVICE}")
+            } catch (e: Exception) {
+                // Android 12+ 后台启动前台服务不被允许时可能在此抛出；降级到 WorkManager，本服务直接退出
+                Log.w(TAG, "[onStartCommand] startForeground 被拒，降级 WorkManager", e)
+                CheckWorker.enqueueOneTimeCheck(applicationContext)
+                stopSelf()
+                return START_NOT_STICKY
+            }
         }
 
         val prefs = applicationContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -150,6 +158,27 @@ class CheckService : LifecycleService() {
         }
 
         return START_NOT_STICKY
+    }
+
+    /**
+     * Android 15+ dataSync 前台服务当日累计运行满 6 小时时由系统回调。
+     *
+     * 必须在数秒内 stopSelf，否则进程 ANR / 崩溃（见 vivo《Android 15 开发者适配文档》1.2）。
+     * 单次检查正常只需几十秒，走到这里说明网络或服务端卡死，直接放弃本轮，等下一次闹钟。
+     *
+     * @param startId   对应 onStartCommand 的 startId
+     * @param fgsType   超时的前台服务类型（API 35 新增的重载）
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w(TAG, "[onTimeout] startId=$startId fgsType=$fgsType, stopping")
+        stopSelf()
+    }
+
+    /** API 34 的旧版 onTimeout 签名；部分设备仍回调此重载，行为同上。 */
+    @Deprecated("Superseded by onTimeout(Int, Int) on API 35")
+    override fun onTimeout(startId: Int) {
+        Log.w(TAG, "[onTimeout] startId=$startId, stopping")
+        stopSelf()
     }
 
     /**

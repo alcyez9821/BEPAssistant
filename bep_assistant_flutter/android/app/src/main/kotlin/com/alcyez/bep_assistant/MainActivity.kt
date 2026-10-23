@@ -59,7 +59,12 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "isMiuiDevice" -> result.success(isMiuiDevice())
+                    "isChineseRom" -> result.success(isChineseRom())
+                    "canScheduleExactAlarms" -> result.success(AlarmReceiver.canScheduleExact(this))
+                    "openExactAlarmSettings" -> openExactAlarmSettings(result)
                     "openAutoStartSettings" -> openAutoStartSettings(result)
+                    "isVivoDevice" -> result.success(isVivoDevice())
+                    "openBackgroundPowerSettings" -> openBackgroundPowerSettings(result)
                     "openBatteryOptimizationSettings" -> openBatteryOptimizationSettings(result)
                     "isBatteryOptimizationExempt" -> result.success(isBatteryOptimizationExempt())
                     "sendNotification" -> {
@@ -72,10 +77,12 @@ class MainActivity : FlutterActivity() {
                         CheckWorker.schedulePolling(this)
                         result.success(true)
                     }
+                    "ensureScheduled" -> result.success(ensureScheduled())
                     "cancelAllScheduled" -> {
                         // 删完最后一个账号时调用：撤销所有后台定时任务
                         AlarmReceiver.cancelAlarms(this)
                         CheckWorker.cancelPolling(this)
+                        CheckWorker.cancelOneTimeCheck(this)
                         result.success(true)
                     }
                     "getMissedNotifications" -> {
@@ -153,6 +160,36 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
+     * Register the daily check alarms immediately when at least one account exists.
+     *
+     * Flutter calls this after the account list changes (login succeeded, account added or
+     * removed) so the background alarm chain starts without waiting for the next cold start.
+     * Before this entry point existed, [onCreate] was the only place that scheduled alarms:
+     * a freshly added account stayed unscheduled until the user killed and reopened the app,
+     * which looked like "the background check only runs when I open the app".
+     *
+     * Idempotent: [AlarmReceiver.scheduleAlarms] reuses an already persisted future trigger
+     * time instead of re-randomizing it, so calling this next to [onCreate] is harmless.
+     *
+     * @return true when alarms are registered; false when the Go bridge is unavailable or
+     *         there is no account, in which case scheduling is skipped
+     *
+     * Side effects: Go library init, AlarmManager registration, SharedPreferences write,
+     * poll log write. Runs on the platform thread like the scheduling done in [onCreate].
+     */
+    private fun ensureScheduled(): Boolean {
+        val goReady = GoBridgeLoader.initIfNeeded(applicationContext) {
+            CheckService.nativeInit(it)
+        }
+        if (!goReady || !CredentialsGateway.hasAccounts(this)) {
+            android.util.Log.i("MainActivity", "[ensureScheduled] skipped goReady=$goReady")
+            return false
+        }
+        AlarmReceiver.scheduleAlarms(this)
+        return true
+    }
+
+    /**
      * 判断当前设备是否 MIUI / HyperOS。
      *
      * Returns:
@@ -163,6 +200,96 @@ class MainActivity : FlutterActivity() {
         return Build.MANUFACTURER.equals("Xiaomi", ignoreCase = true) ||
             Build.BRAND.equals("Xiaomi", ignoreCase = true) ||
             Build.BRAND.equals("Redmi", ignoreCase = true)
+    }
+
+    /**
+     * 判断是否为需要手动开"自启动 / 后台运行"的国产 ROM。
+     *
+     * 这些 ROM 在标准 Android 后台限制之外还有自己的后台管控：进程被清理后，
+     * 闹钟广播也无法拉起未授权"自启动"的应用 —— 表现为"只有 App 打开时定时任务才执行"。
+     *
+     * @return true 表示小米 / 华为 / 荣耀 / OPPO / 一加 / realme / vivo / iQOO / 魅族
+     */
+    private fun isChineseRom(): Boolean {
+        val tokens = listOf(Build.MANUFACTURER, Build.BRAND).map { it.lowercase() }
+        val vendors = listOf(
+            "xiaomi", "redmi", "huawei", "honor", "oppo", "oneplus",
+            "realme", "vivo", "iqoo", "meizu"
+        )
+        return tokens.any { token -> vendors.any { token.contains(it) } }
+    }
+
+    /** 是否为 vivo / iQOO 设备（OriginOS / Funtouch OS）。 */
+    private fun isVivoDevice(): Boolean {
+        val tokens = listOf(Build.MANUFACTURER, Build.BRAND).map { it.lowercase() }
+        return tokens.any { it.contains("vivo") || it.contains("iqoo") }
+    }
+
+    /**
+     * 跳到 vivo"后台耗电管理"页，让用户把本应用设为"允许后台高耗电"。
+     *
+     * vivo 在标准电池优化之外另有一套后台功耗管控（com.iqoo.powersaving）：未允许后台高耗电的
+     * 应用在后台持续耗电时会被系统冻结或清理，导致定时检查不执行。该开关没有公开 API 可查询。
+     * 组件名取自 OriginOS（Android 17，PD2502）实机日志，按新到旧逐个尝试；全部失败时兜底应用详情页
+     * （用户可从"电池"子项进入）。
+     */
+    private fun openBackgroundPowerSettings(result: MethodChannel.Result) {
+        val candidates = listOf(
+            ComponentName("com.iqoo.powersaving", "com.iqoo.powersaving.activity.ExcessivePowerManagerActivity"),
+            ComponentName("com.iqoo.powersaving", "com.iqoo.powersaving.PowerSavingManagerActivity"),
+            ComponentName("com.vivo.abe", "com.vivo.applicationbehaviorengine.ui.ExcessivePowerManagerActivity"),
+        )
+        for (component in candidates) {
+            try {
+                startActivity(Intent().apply {
+                    this.component = component
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                })
+                result.success(true)
+                return
+            } catch (_: Exception) { }
+        }
+        openAppDetails(result)
+    }
+
+    /**
+     * 跳到系统"闹钟和提醒"（精确闹钟）授权页。Android 12 以下无此权限，直接返回 true。
+     *
+     * Android 14+ 新安装应用默认不授予 SCHEDULE_EXACT_ALARM；未授予时只能注册非精确闹钟，
+     * 系统可能推迟触发，且非精确闹钟不允许从后台启动前台服务。
+     * 用户授权后系统发送 ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED，
+     * 由 [BootReceiver] 重新注册为精确闹钟。
+     */
+    private fun openExactAlarmSettings(result: MethodChannel.Result) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            result.success(true)
+            return
+        }
+        try {
+            startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                data = Uri.parse("package:$packageName")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+            result.success(true)
+        } catch (_: Exception) {
+            // 个别 ROM 未实现该页面，兜底应用详情页
+            openAppDetails(result)
+        }
+    }
+
+    /** 跳到本应用的系统详情页；作为各种厂商页面跳转失败时的兜底。 */
+    private fun openAppDetails(result: MethodChannel.Result) {
+        try {
+            startActivity(Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:$packageName")
+            ).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+            result.success(true)
+        } catch (_: Exception) {
+            result.success(false)
+        }
     }
 
     /**
@@ -237,19 +364,38 @@ class MainActivity : FlutterActivity() {
             }
         }
 
-        // vivo
-        if (manufacturer.contains("vivo")) {
-            try {
-                startActivity(Intent().apply {
-                    component = ComponentName(
-                        "com.vivo.permissionmanager",
-                        "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"
-                    )
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                })
-                result.success(true)
-                return
-            } catch (_: Exception) { }
+        // vivo / iQOO（OriginOS / Funtouch OS）：
+        // 不同系统版本的"自启动 / 后台启动管理"入口组件不同，按新到旧逐个尝试；
+        // 非导出组件会抛 SecurityException，被 catch 后继续下一个。
+        if (manufacturer.contains("vivo") || Build.BRAND.lowercase().contains("iqoo")) {
+            val vivoIntents = listOf(
+                ComponentName(
+                    "com.vivo.permissionmanager",
+                    "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"
+                ),
+                ComponentName(
+                    "com.iqoo.secure",
+                    "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager"
+                ),
+                ComponentName(
+                    "com.iqoo.secure",
+                    "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity"
+                ),
+                ComponentName(
+                    "com.vivo.permissionmanager",
+                    "com.vivo.permissionmanager.activity.PurviewTabActivity"
+                ),
+            )
+            for (component in vivoIntents) {
+                try {
+                    startActivity(Intent().apply {
+                        this.component = component
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    })
+                    result.success(true)
+                    return
+                } catch (_: Exception) { }
+            }
         }
 
         // 三星 - 打开后台使用限制页面（AppPowerManagementActivity）
@@ -265,34 +411,28 @@ class MainActivity : FlutterActivity() {
         }
 
         // Fallback: 应用详情页
-        try {
-            startActivity(Intent(
-                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                Uri.parse("package:$packageName")
-            ).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            })
-            result.success(true)
-        } catch (_: Exception) {
-            result.success(false)
-        }
+        openAppDetails(result)
     }
 
     /**
-     * 跳到系统电池优化设置页（一律走应用详情页；用户从那里能进入电池优化子页面）。
+     * 请求把本应用加入"忽略电池优化"白名单。
+     *
+     * 优先弹系统确认框（ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS，需 Manifest 声明同名权限）；
+     * 已在白名单或个别 ROM 不支持时兜底跳应用详情页，由用户在"电池"子页面手动设置
+     * （vivo 需设为"允许后台高耗电"）。
      */
     private fun openBatteryOptimizationSettings(result: MethodChannel.Result) {
-        try {
-            startActivity(Intent(
-                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                Uri.parse("package:$packageName")
-            ).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            })
-            result.success(true)
-        } catch (_: Exception) {
-            result.success(false)
+        if (!isBatteryOptimizationExempt()) {
+            try {
+                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:$packageName")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                })
+                result.success(true)
+                return
+            } catch (_: Exception) { }
         }
+        openAppDetails(result)
     }
 
     /**

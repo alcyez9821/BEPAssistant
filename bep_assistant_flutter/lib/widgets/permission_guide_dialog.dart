@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: MIT
 //
 // File: widgets/permission_guide_dialog.dart
-// Purpose: 权限引导对话框 —— 通知 / 电池优化 / 自启动 三个权限项的可视化引导。
+// Purpose: 权限引导对话框 —— 通知 / 闹钟和提醒 / 电池优化 / 自启动 / vivo 后台高耗电 的可视化引导。
 // Author: alcyez (AI Agent 辅助生成注释)
 // Created: 2026-07-06
 //
 // Business Context:
-//   国产 ROM（尤其 MIUI）后台限制严格，闹钟被系统冻结、通知被拦截都会导致到期提醒
+//   国产 ROM（MIUI / OriginOS / ColorOS 等）后台限制严格，闹钟被系统冻结、通知被拦截都会导致到期提醒
 //   失效。本对话框把三个需要用户手动操作的设置项列出来，每项提供"去设置"跳转 + "我已
 //   设置"手动确认按钮，让用户能一步步搞定。
 //
@@ -32,8 +32,11 @@ class _PermissionGuideDialogState extends State<PermissionGuideDialog>
     with WidgetsBindingObserver {
   bool _notifGranted = false;
   bool _batteryExempt = false;
+  bool _exactAlarmGranted = true;
   bool _isChineseRom = false;
   bool _autoStartSet = false;
+  bool _isVivo = false;
+  bool _bgPowerSet = false;
   bool _loading = true;
 
   @override
@@ -62,12 +65,17 @@ class _PermissionGuideDialogState extends State<PermissionGuideDialog>
   Future<void> _checkPermissions() async {
     final result = await PermissionService.checkAll();
     final autoStartSet = await PermissionService.isAutoStartSet();
+    final isVivo = await PermissionBridge.isVivoDevice();
+    final bgPowerSet = await PermissionService.isBackgroundPowerSet();
     if (mounted) {
       setState(() {
         _notifGranted = result.notificationGranted;
         _batteryExempt = result.batteryExempt;
+        _exactAlarmGranted = result.exactAlarmGranted;
         _isChineseRom = result.isChineseRom;
         _autoStartSet = autoStartSet;
+        _isVivo = isVivo;
+        _bgPowerSet = bgPowerSet;
         _loading = false;
       });
     }
@@ -89,10 +97,16 @@ class _PermissionGuideDialogState extends State<PermissionGuideDialog>
                 children: [
                   _buildNotifItem(),
                   const SizedBox(height: 12),
+                  _buildExactAlarmItem(),
+                  const SizedBox(height: 12),
                   _buildBatteryItem(),
                   if (_isChineseRom) ...[
                     const SizedBox(height: 12),
                     _buildAutoStartItem(),
+                  ],
+                  if (_isVivo) ...[
+                    const SizedBox(height: 12),
+                    _buildBackgroundPowerItem(),
                   ],
                 ],
               ),
@@ -133,13 +147,32 @@ class _PermissionGuideDialogState extends State<PermissionGuideDialog>
     );
   }
 
+  /// 精确闹钟项 —— 有标准 API（canScheduleExactAlarms），只需"去授权"跳转系统"闹钟和提醒"页；
+  /// 用户返回时 resumed 生命周期自动刷新状态。
+  Widget _buildExactAlarmItem() {
+    return _buildPermissionItem(
+      icon: _exactAlarmGranted ? Icons.check_circle : Icons.warning_amber,
+      iconColor: _exactAlarmGranted ? Colors.green : Colors.orange,
+      title: '闹钟和提醒',
+      subtitle: '允许准时触发每日定时检查，否则系统可能推迟或跳过',
+      status: _exactAlarmGranted ? '已授权' : '未授权',
+      statusColor: _exactAlarmGranted ? Colors.green : Colors.red,
+      actionLabel: _exactAlarmGranted ? null : '去授权',
+      onPressed: _exactAlarmGranted
+          ? null
+          : () {
+              PermissionBridge.openExactAlarmSettings();
+            },
+    );
+  }
+
   /// 电池优化项 —— 无标准 API 查询，双按钮："去设置"跳转 + "我已设置"手动确认。
   Widget _buildBatteryItem() {
     return _buildPermissionItem(
       icon: _batteryExempt ? Icons.check_circle : Icons.warning_amber,
       iconColor: _batteryExempt ? Colors.green : Colors.orange,
       title: '电池优化',
-      subtitle: '将应用从电池优化列表移除，确保定时检查正常运行',
+      subtitle: '将应用从系统电池优化列表移除，确保定时检查正常运行',
       status: _batteryExempt ? '已设为无限制' : '未设置',
       statusColor: _batteryExempt ? Colors.green : Colors.red,
       actionLabel: _batteryExempt ? null : '去设置',
@@ -158,13 +191,13 @@ class _PermissionGuideDialogState extends State<PermissionGuideDialog>
     );
   }
 
-  /// 自启动项 —— MIUI 专属，仅在 [_isChineseRom] 为 true 时显示。
+  /// 自启动项 —— 国产 ROM 专属，仅在 [_isChineseRom] 为 true 时显示。
   Widget _buildAutoStartItem() {
     return _buildPermissionItem(
       icon: _autoStartSet ? Icons.check_circle : Icons.warning_amber,
       iconColor: _autoStartSet ? Colors.green : Colors.orange,
       title: '自启动',
-      subtitle: '系统需要手动开启自启动，否则后台定时检查可能失效',
+      subtitle: '需手动开启自启动 / 后台启动，否则 App 关闭后定时检查不会执行',
       status: _autoStartSet ? '已设置' : '未设置',
       statusColor: _autoStartSet ? Colors.green : Colors.red,
       actionLabel: _autoStartSet ? null : '去设置',
@@ -178,6 +211,34 @@ class _PermissionGuideDialogState extends State<PermissionGuideDialog>
           ? null
           : () async {
               await PermissionService.markAutoStartSet();
+              _checkPermissions();
+            },
+    );
+  }
+
+  /// vivo"后台高耗电"项 —— vivo 专属，仅在 [_isVivo] 为 true 时显示。
+  ///
+  /// 与标准"电池优化"是两套独立开关：vivo 的后台功耗管控会冻结 / 清理后台耗电的应用，
+  /// 无公开 API 可查询状态，因此同自启动一样采用"去设置 + 我已设置"双按钮软标记。
+  Widget _buildBackgroundPowerItem() {
+    return _buildPermissionItem(
+      icon: _bgPowerSet ? Icons.check_circle : Icons.warning_amber,
+      iconColor: _bgPowerSet ? Colors.green : Colors.orange,
+      title: '后台高耗电',
+      subtitle: '电池 → 后台耗电管理 → 进京证助手 → 允许后台高耗电，否则后台检查可能被系统冻结',
+      status: _bgPowerSet ? '已设置' : '未设置',
+      statusColor: _bgPowerSet ? Colors.green : Colors.red,
+      actionLabel: _bgPowerSet ? null : '去设置',
+      onPressed: _bgPowerSet
+          ? null
+          : () {
+              PermissionBridge.openBackgroundPowerSettings();
+            },
+      confirmLabel: _bgPowerSet ? null : '我已设置',
+      onConfirm: _bgPowerSet
+          ? null
+          : () async {
+              await PermissionService.markBackgroundPowerSet();
               _checkPermissions();
             },
     );

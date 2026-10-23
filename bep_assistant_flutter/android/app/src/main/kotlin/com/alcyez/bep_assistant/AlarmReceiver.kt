@@ -14,22 +14,28 @@ import java.util.Random
 
 /**
  * File: AlarmReceiver.kt
- * Purpose: 每日两次随机时间的定时检查闹钟 —— 到点广播触发 CheckService。
+ * Purpose: 每日两次随机时间的定时检查闹钟 —— 到点广播触发 CheckService（失败时降级 WorkManager）。
  * Author: alcyez (AI Agent 辅助生成注释)
  * Created: 2026-07-06
  *
  * Business Context:
  *   北京交警官方 app 会检测短时间内高频调用作为爬虫特征。为分散请求时段，每天在
- *   8:00-12:00 之间随机挑一个时间点触发一次检查，再在 8 小时后（16:00-20:00 之间）
- *   触发第二次。用户对"上午/傍晚各一次"这种密度基本无感，但不容易被服务端识别为固定
+ *   上午窗口 [8:00, 12:00) 随机挑一个时间点触发一次检查，再在傍晚窗口 [16:00, 20:00)
+ *   随机触发第二次。用户对"上午/傍晚各一次"这种密度基本无感，但不容易被服务端识别为固定
  *   刷新频率。
  *
  * Key Logic:
- *   1. scheduleAlarms：随机计算今日两个时间点（已过则推到明天），注册 setAlarmClock
- *      精确闹钟；Android 12+ 未授权精确闹钟时降级到 setWindow ±5 分钟。
- *   2. onReceive：触发前先检查有账户；无账户则不再启动 CheckService、也不排明天的闹钟
- *      —— 删完账号后即使闹钟已排，也能自然退出而不再打扰用户。
- *   3. 每次触发时立即排明天的两个闹钟，保证链不断（不依赖 setRepeating，因为随机时间点）。
+ *   1. 两个时段（FIRST / SECOND）独立调度，下一次触发时间持久化在 SharedPreferences：
+ *      - scheduleAlarms：若已存的时间仍在未来则原样重注册（App 每次冷启动调用不会把已排好的
+ *        闹钟重新随机，也不会导致当天重复/漏触发）；否则按"今天窗口未过取今天，否则明天"计算
+ *      - 某时段触发后只把该时段排到"明天"，不影响另一个时段（修复旧实现中第一个闹钟触发时
+ *        重排会覆盖掉当天第二个闹钟、或当天再触发一次的问题）
+ *   2. 有精确闹钟权限时用 setAlarmClock（Doze 下准时 + 允许后台启动前台服务）；
+ *      无权限时降级为 setAndAllowWhileIdle（Doze 下也能投递，但时间不精确）。
+ *   3. onReceive 先续排下一次闹钟、再执行检查 —— 即使后续步骤抛异常，闹钟链也不会断。
+ *   4. 启动 CheckService 失败（Android 12+ 非精确闹钟触发时不允许后台启动前台服务，
+ *      会抛 ForegroundServiceStartNotAllowedException）时降级为 WorkManager 加急任务。
+ *   5. 重活（Go 初始化、查 DB）放到 goAsync + 子线程，避免主线程 ANR。
  */
 class AlarmReceiver : BroadcastReceiver() {
 
@@ -40,106 +46,165 @@ class AlarmReceiver : BroadcastReceiver() {
         private const val ACTION_FIRST = "com.alcyez.bep_assistant.ALARM_FIRST"
         private const val ACTION_SECOND = "com.alcyez.bep_assistant.ALARM_SECOND"
 
+        /** SharedPreferences 命名空间：保存每个时段的下一次触发时间（epoch millis） */
+        private const val PREF_NAME = "alarm_prefs"
+        private const val KEY_NEXT_FIRST = "next_first_millis"
+        private const val KEY_NEXT_SECOND = "next_second_millis"
+
         /**
-         * 注册今日两个闹钟（随机 8-12 点 + 8h 后），已过则推到明天。
+         * 一个时段的静态描述。
          *
-         * 随机时间生成规则：
-         *   firstTime  = 今天 [8-11] 点 [0-59] 分（若已过，滚到明天）
-         *   secondTime = firstTime + 8 小时
-         *
-         * 两次触发间隔 8 小时能让上午 / 傍晚各刷新一次，覆盖大多数用户想看到到期提醒的时间段。
+         * @property startHour 窗口起始小时（含）
+         * @property spanHours 窗口长度（小时），实际触发时间在 [startHour, startHour+spanHours) 内随机
          */
-        fun scheduleAlarms(context: Context) {
-            Log.i(TAG, "[scheduleAlarms] called")
-            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-            val random = Random()
-
-            val firstTime = Calendar.getInstance().apply {
-                set(Calendar.HOUR_OF_DAY, 8 + random.nextInt(4))
-                set(Calendar.MINUTE, random.nextInt(60))
-                set(Calendar.SECOND, 0)
-                set(Calendar.MILLISECOND, 0)
-                if (before(Calendar.getInstance())) add(Calendar.DAY_OF_MONTH, 1)
-            }
-
-            val secondTime = (firstTime.clone() as Calendar).apply {
-                add(Calendar.HOUR_OF_DAY, 8)
-            }
-
-            registerAlarm(context, alarmManager, REQUEST_CODE_FIRST, ACTION_FIRST, firstTime)
-            registerAlarm(context, alarmManager, REQUEST_CODE_SECOND, ACTION_SECOND, secondTime)
-            Log.i(TAG, "[scheduleAlarms] registered first=${firstTime.time} second=${secondTime.time}")
+        private enum class Slot(
+            val requestCode: Int,
+            val action: String,
+            val prefKey: String,
+            val startHour: Int,
+            val spanHours: Int,
+        ) {
+            FIRST(REQUEST_CODE_FIRST, ACTION_FIRST, KEY_NEXT_FIRST, 8, 4),
+            SECOND(REQUEST_CODE_SECOND, ACTION_SECOND, KEY_NEXT_SECOND, 16, 4),
         }
 
         /**
-         * 取消所有已注册的闹钟。
+         * 注册（或恢复）两个时段的闹钟。App 冷启动、开机、精确闹钟权限变化时调用。
+         *
+         * 已持久化的触发时间仍在未来时原样重注册（幂等）；已过期或不存在时重新随机计算。
+         * 副作用：写 SharedPreferences、调用 AlarmManager。
+         */
+        fun scheduleAlarms(context: Context) {
+            Log.i(TAG, "[scheduleAlarms] called")
+            val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val now = System.currentTimeMillis()
+            for (slot in Slot.values()) {
+                val stored = prefs.getLong(slot.prefKey, 0L)
+                val target = if (stored > now) stored else nextTriggerMillis(slot, now, allowToday = true)
+                registerSlot(context, slot, target)
+            }
+        }
+
+        /**
+         * 取消所有已注册的闹钟并清除持久化的触发时间。
          *
          * 删完最后一个账号时调用；避免"空账户但闹钟还在响"导致 CheckService 空转，
          * 每天弹出"正在执行定时检查..."通知打扰用户。
          */
         fun cancelAlarms(context: Context) {
             val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-            for ((requestCode, action) in listOf(
-                REQUEST_CODE_FIRST to ACTION_FIRST,
-                REQUEST_CODE_SECOND to ACTION_SECOND,
-            )) {
-                val intent = Intent(context, AlarmReceiver::class.java).apply { this.action = action }
-                val pendingIntent = PendingIntent.getBroadcast(
-                    context, requestCode, intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
+            for (slot in Slot.values()) {
+                val pendingIntent = buildPendingIntent(context, slot)
                 alarmManager.cancel(pendingIntent)
                 pendingIntent.cancel()
             }
+            context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit().clear().apply()
             Log.i(TAG, "[cancelAlarms] cancelled all")
         }
 
         /**
-         * 注册单个闹钟，Android 12+ 精确闹钟权限缺失时自动降级到 setWindow。
+         * 计算某时段的下一次随机触发时间。
          *
-         * @param context      Android 上下文
-         * @param alarmManager AlarmManager 实例（外部拿一次复用）
-         * @param requestCode  PendingIntent request code（1001 / 1002 分别是两次闹钟）
-         * @param action       BroadcastReceiver 里区分两次闹钟的 action string
-         * @param target       目标时间点（Calendar）
+         * @param now        当前时间（epoch millis）
+         * @param allowToday true 时若今天窗口内随机到的时间点尚未过去则取今天；
+         *                   false 时强制从明天开始（用于该时段刚触发完后的续排）
+         * @return 下一次触发时间（epoch millis）
          */
-        private fun registerAlarm(
-            context: Context, alarmManager: AlarmManager,
-            requestCode: Int, action: String, target: Calendar
-        ) {
-            val intent = Intent(context, AlarmReceiver::class.java).apply { this.action = action }
-            val pendingIntent = PendingIntent.getBroadcast(
-                context, requestCode, intent,
+        private fun nextTriggerMillis(slot: Slot, now: Long, allowToday: Boolean): Long {
+            val random = Random()
+            val cal = Calendar.getInstance().apply {
+                timeInMillis = now
+                set(Calendar.HOUR_OF_DAY, slot.startHour + random.nextInt(slot.spanHours))
+                set(Calendar.MINUTE, random.nextInt(60))
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+            }
+            if (!allowToday || cal.timeInMillis <= now) cal.add(Calendar.DAY_OF_MONTH, 1)
+            return cal.timeInMillis
+        }
+
+        /** 构造某时段对应的广播 PendingIntent（requestCode + action 区分时段，FLAG_UPDATE_CURRENT 幂等覆盖）。 */
+        private fun buildPendingIntent(context: Context, slot: Slot): PendingIntent {
+            val intent = Intent(context, AlarmReceiver::class.java).apply { action = slot.action }
+            return PendingIntent.getBroadcast(
+                context, slot.requestCode, intent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
+        }
+
+        /**
+         * 注册单个时段的闹钟并持久化触发时间。
+         *
+         * 有精确闹钟权限 → setAlarmClock（最高优先级，Doze 下准时，且系统允许其广播从后台启动前台服务）；
+         * 无权限 → setAndAllowWhileIdle（Doze 下仍可投递，时间由系统批量调整，可能延后）。
+         * 副作用：AlarmManager 注册、写 SharedPreferences。所有异常被吞掉并记日志，避免影响调用方。
+         *
+         * @param targetMillis 目标触发时间（epoch millis）
+         */
+        private fun registerSlot(context: Context, slot: Slot, targetMillis: Long) {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val pendingIntent = buildPendingIntent(context, slot)
             try {
-                // Android 12+ 需运行时权限：未授予时降级到不精确闹钟，避免 SecurityException 静默丢失
-                val canExact = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-                    alarmManager.canScheduleExactAlarms()
-                if (canExact) {
-                    // setAlarmClock 是最高优先级：即使 Doze 也会准时唤醒；点击闹钟图标能拉起 App
+                if (canScheduleExact(context)) {
+                    val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+                        ?: Intent(context, MainActivity::class.java)
                     val showIntent = PendingIntent.getActivity(
-                        context, 0,
-                        context.packageManager.getLaunchIntentForPackage(context.packageName),
-                        PendingIntent.FLAG_IMMUTABLE
+                        context, 0, launchIntent, PendingIntent.FLAG_IMMUTABLE
                     )
                     alarmManager.setAlarmClock(
-                        AlarmManager.AlarmClockInfo(target.timeInMillis, showIntent), pendingIntent
+                        AlarmManager.AlarmClockInfo(targetMillis, showIntent), pendingIntent
                     )
+                    Log.i(TAG, "[registerSlot] $slot setAlarmClock at ${java.util.Date(targetMillis)}")
                 } else {
-                    Log.w(TAG, "精确闹钟权限未授予，降级为 setWindow（±5 分钟）")
-                    alarmManager.setWindow(
-                        AlarmManager.RTC_WAKEUP,
-                        target.timeInMillis,
-                        5 * 60 * 1000L,
-                        pendingIntent
-                    )
+                    Log.w(TAG, "[registerSlot] $slot 无精确闹钟权限，降级为 setAndAllowWhileIdle at ${java.util.Date(targetMillis)}")
+                    alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, targetMillis, pendingIntent)
                 }
+                context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                    .edit().putLong(slot.prefKey, targetMillis).apply()
             } catch (e: SecurityException) {
                 Log.e(TAG, "注册闹钟被拒（精确闹钟权限未授予）", e)
             } catch (e: Exception) {
                 Log.e(TAG, "注册闹钟失败", e)
             }
+        }
+
+        /**
+         * 当前是否可注册精确闹钟。Android 12 以下恒为 true；12+ 取决于用户是否授予
+         * "闹钟和提醒"（SCHEDULE_EXACT_ALARM）权限 —— Android 14+ 新安装默认拒绝。
+         */
+        fun canScheduleExact(context: Context): Boolean {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            return alarmManager.canScheduleExactAlarms()
+        }
+
+        /**
+         * 拉起一次后台检查：优先前台服务 CheckService，被系统拒绝时降级为 WorkManager 加急任务。
+         *
+         * Android 12+ 仅在少数豁免场景（精确闹钟触发、用户可见等）允许后台启动前台服务；
+         * 非精确闹钟、开机广播（Android 15 禁止 dataSync 类型）等场景会抛
+         * ForegroundServiceStartNotAllowedException（IllegalStateException 子类）。
+         *
+         * @param preferWorker true 时跳过前台服务直接走 WorkManager（已知不允许启动前台服务的场景）
+         */
+        fun launchCheck(context: Context, preferWorker: Boolean = false) {
+            if (!preferWorker) {
+                try {
+                    val serviceIntent = Intent(context, CheckService::class.java)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        context.startForegroundService(serviceIntent)
+                    } else {
+                        context.startService(serviceIntent)
+                    }
+                    Log.i(TAG, "[launchCheck] CheckService started")
+                    return
+                } catch (e: IllegalStateException) {
+                    Log.w(TAG, "[launchCheck] 前台服务启动被拒，降级 WorkManager", e)
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "[launchCheck] 前台服务启动被拒（权限），降级 WorkManager", e)
+                }
+            }
+            CheckWorker.enqueueOneTimeCheck(context)
         }
     }
 
@@ -147,38 +212,45 @@ class AlarmReceiver : BroadcastReceiver() {
      * 闹钟到点广播回调。
      *
      * 处理顺序：
-     *   1. 加载 Go 库 + init（保证下面 hasAccounts 走 Go FFI 查 DB）
-     *   2. 无账户则 cancelAlarms 阻止后续触发 —— 用户删完账号后立即生效
-     *   3. 启动 CheckService（Android 8+ 用 startForegroundService）
-     *   4. 排明天的两个闹钟，保证链不断
+     *   1. 立即把触发的这个时段续排到明天（不依赖 Go，保证链不断）
+     *   2. goAsync + 子线程：加载 Go 库 + init → 无账户则 cancelAlarms 并退出
+     *   3. 有账户 → launchCheck（前台服务，失败降级 WorkManager）
      */
     override fun onReceive(context: Context, intent: Intent) {
         Log.i(TAG, "[onReceive] action=${intent.action}")
-
-        // 先确保 Go 初始化，才能通过 FFI 查 accounts
-        GoBridgeLoader.loadLibrary()
-        val goReady = GoBridgeLoader.initIfNeeded(context) { CheckService.nativeInit(it) }
-        if (!goReady) {
-            Log.w(TAG, "[onReceive] Go init failed, skip")
+        val slot = Slot.values().firstOrNull { it.action == intent.action }
+        if (slot == null) {
+            Log.w(TAG, "[onReceive] unknown action, ignore")
             return
         }
 
-        // 无账户则不启动前台服务、也不再排明天的闹钟，避免删完账号后仍每日弹出"正在执行定时检查..."
-        if (!CredentialsGateway.hasAccounts(context)) {
-            Log.i(TAG, "[onReceive] no accounts, cancelling future alarms")
-            cancelAlarms(context)
-            return
-        }
+        // 第一步就续排，确保后续任何异常都不会让闹钟链断掉
+        registerSlot(context, slot, nextTriggerMillis(slot, System.currentTimeMillis(), allowToday = false))
 
-        val serviceIntent = Intent(context, CheckService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Log.i(TAG, "[onReceive] startForegroundService")
-            context.startForegroundService(serviceIntent)
-        } else {
-            context.startService(serviceIntent)
-        }
-
-        // 注册明天的两个闹钟，保证链不断（AlarmManager 用 requestCode 幂等，会覆盖）
-        scheduleAlarms(context)
+        val appContext = context.applicationContext
+        val pendingResult = goAsync()
+        Thread {
+            try {
+                GoBridgeLoader.loadLibrary()
+                val goReady = GoBridgeLoader.initIfNeeded(appContext) { CheckService.nativeInit(it) }
+                if (!goReady) {
+                    // Go 初始化失败也交给 Worker：Worker 有重试，且不受广播时限约束
+                    Log.w(TAG, "[onReceive] Go init failed, fallback to worker")
+                    CheckWorker.enqueueOneTimeCheck(appContext)
+                    return@Thread
+                }
+                // 无账户则不启动检查、并撤销闹钟，避免删完账号后仍每日弹出"正在执行定时检查..."
+                if (!CredentialsGateway.hasAccounts(appContext)) {
+                    Log.i(TAG, "[onReceive] no accounts, cancelling future alarms")
+                    cancelAlarms(appContext)
+                    return@Thread
+                }
+                launchCheck(appContext)
+            } catch (e: Throwable) {
+                Log.e(TAG, "[onReceive] failed", e)
+            } finally {
+                pendingResult.finish()
+            }
+        }.start()
     }
 }
