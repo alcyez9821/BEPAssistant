@@ -32,17 +32,30 @@ bep_assistant_flutter/android/captures/
 bep_assistant_flutter/android/.cxx/
 
 # =====================================================
-# 敏感文件（正式签名、密钥）
+# 敏感文件（正式签名、密钥、凭据）
 # =====================================================
 bep_assistant_flutter/android/key.properties
 bep_assistant_flutter/android/*.keystore
 bep_assistant_flutter/android/*.jks
+*.keystore
+*.jks
+*.p12
+*.pem
+*.key
+key.properties
+.env
+.env.*
 
 # =====================================================
-# 编译产物（Go .so、ONNX Runtime .so、ONNX 模型）
+# 编译产物（Go .so、ONNX Runtime .so、ONNX 模型、APK）
 # =====================================================
 bep_assistant_flutter/android/app/src/main/jniLibs/
 bep_assistant_flutter/assets/models/captcha.onnx
+*.apk
+*.aab
+*.aar
+*.so
+*.onnx
 
 # =====================================================
 # 数据库文件（含运行时生成的 -wal / -shm）
@@ -68,8 +81,12 @@ bep_assistant_flutter/assets/models/captcha.onnx
 Thumbs.db
 
 # =====================================================
-# 本地工具/临时数据
+# 本地工具/临时数据（含设备日志导出、诊断产物）
 # =====================================================
 .claude/
+.kilo/
 *.log
 *.txt.tmp
+logs_*.log
+poll_log.txt
+*.hprof
