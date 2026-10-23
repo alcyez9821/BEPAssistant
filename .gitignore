@@ -1,0 +1,75 @@
+# =====================================================
+# 文档与说明（按要求：源码仓库不含 md），仅根 README.md 例外
+# =====================================================
+*.md
+!/README.md
+
+# =====================================================
+# Go 侧
+# =====================================================
+bep_assistant_go/bin/
+bep_assistant_go/*.exe
+bep_assistant_go/*.test
+bep_assistant_go/*.out
+
+# =====================================================
+# Flutter / Dart 侧
+# =====================================================
+bep_assistant_flutter/.dart_tool/
+bep_assistant_flutter/build/
+bep_assistant_flutter/.flutter-plugins-dependencies
+bep_assistant_flutter/.metadata
+bep_assistant_flutter/pubspec.lock
+
+# =====================================================
+# Android 构建
+# =====================================================
+bep_assistant_flutter/android/.gradle/
+bep_assistant_flutter/android/app/build/
+bep_assistant_flutter/android/build/
+bep_assistant_flutter/android/local.properties
+bep_assistant_flutter/android/captures/
+bep_assistant_flutter/android/.cxx/
+
+# =====================================================
+# 敏感文件（正式签名、密钥）
+# =====================================================
+bep_assistant_flutter/android/key.properties
+bep_assistant_flutter/android/*.keystore
+bep_assistant_flutter/android/*.jks
+
+# =====================================================
+# 编译产物（Go .so、ONNX Runtime .so、ONNX 模型）
+# =====================================================
+bep_assistant_flutter/android/app/src/main/jniLibs/
+bep_assistant_flutter/assets/models/captcha.onnx
+
+# =====================================================
+# 数据库文件（含运行时生成的 -wal / -shm）
+# =====================================================
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# =====================================================
+# IDE / 编辑器
+# =====================================================
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# =====================================================
+# 操作系统
+# =====================================================
+.DS_Store
+Thumbs.db
+
+# =====================================================
+# 本地工具/临时数据
+# =====================================================
+.claude/
+*.log
+*.txt.tmp
