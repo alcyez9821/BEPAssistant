@@ -12,7 +12,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../widgets/permission_guide_dialog.dart';
-import 'poll_debug_page.dart';
 
 /// 应用设置页。三个分区：权限设置、问题反馈、关于。
 class SettingsPage extends StatelessWidget {
@@ -39,16 +38,6 @@ class SettingsPage extends StatelessWidget {
             onTap: () => showDialog(
               context: context,
               builder: (_) => const PermissionGuideDialog(),
-            ),
-          ),
-          ListTile(
-            leading: const Icon(Icons.bug_report_outlined),
-            title: const Text('后台轮询诊断（测试）'),
-            subtitle: const Text('查看闹钟状态与 BEP_POLL 轮询日志'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const PollDebugPage()),
             ),
           ),
           const Divider(),
