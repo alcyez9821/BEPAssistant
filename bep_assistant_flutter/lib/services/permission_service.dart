@@ -16,7 +16,8 @@
 //   1. 电池优化状态复合判断：优先看系统 API [isBatteryOptimizationExempt]，
 //      失败或返回 false 时看 SharedPreferences 里用户是否已点过"我已设置"
 //   2. shouldShowDialog: 如果用户已选"不再提醒"，一律不再弹权限引导对话框
-//   3. MIUI 设备额外展示"自启动"引导项
+//   3. 国产 ROM（小米 / 华为 / OPPO / vivo 等）额外展示"自启动"引导项
+//   4. Android 12+ 检查"闹钟和提醒"（精确闹钟）权限
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'permission_bridge.dart';
@@ -29,17 +30,22 @@ class PermissionCheckResult {
   /// 是否已从电池优化列表移除（可能来自系统 API 或用户手动确认）。
   final bool batteryExempt;
 
-  /// 是否为国产 ROM（当前只判 MIUI）；决定是否额外展示"自启动"引导项。
+  /// 是否为国产 ROM（小米 / 华为 / OPPO / vivo 等）；决定是否额外展示"自启动"引导项。
   final bool isChineseRom;
+
+  /// 是否已获得"闹钟和提醒"（精确闹钟）权限；Android 12 以下恒为 true。
+  /// 未授予时定时检查只能用非精确闹钟，可能被系统推迟，也无法从后台启动前台服务。
+  final bool exactAlarmGranted;
 
   const PermissionCheckResult({
     required this.notificationGranted,
     required this.batteryExempt,
     required this.isChineseRom,
+    required this.exactAlarmGranted,
   });
 
-  /// 是否所有权限都已到位。isChineseRom 不影响此判断 —— 自启动状态由 UI 独立判断。
-  bool get allGood => notificationGranted && batteryExempt;
+  /// 是否所有可查询的权限都已到位。isChineseRom 不影响此判断 —— 自启动状态由 UI 独立判断。
+  bool get allGood => notificationGranted && batteryExempt && exactAlarmGranted;
 }
 
 /// 权限相关的静态服务类：集中管理 SharedPreferences key 和查询逻辑。
@@ -73,12 +79,14 @@ class PermissionService {
     final batterySetByUser = prefs.getBool(_batterySetKey) ?? false;
     final batteryExempt = batteryExemptByApi || batterySetByUser;
 
-    final isMiui = await PermissionBridge.isMiuiDevice();
+    final isChineseRom = await PermissionBridge.isChineseRom();
+    final exactAlarmGranted = await PermissionBridge.canScheduleExactAlarms();
 
     return PermissionCheckResult(
       notificationGranted: notifGranted,
       batteryExempt: batteryExempt,
-      isChineseRom: isMiui,
+      isChineseRom: isChineseRom,
+      exactAlarmGranted: exactAlarmGranted,
     );
   }
 
@@ -128,7 +136,7 @@ class PermissionService {
   ///
   /// 逻辑：
   ///   - 用户点过"不再提醒"→ 不弹
-  ///   - 否则：任一权限未到位，或是 MIUI 设备（需要引导手动开自启动）→ 弹
+  ///   - 否则：任一权限未到位，或是国产 ROM 且用户未确认已开自启动 → 弹
   ///
   /// Returns:
   ///   true 表示应弹出。
@@ -137,6 +145,7 @@ class PermissionService {
     if (dismissed) return false;
 
     final status = await checkAll();
-    return !status.allGood || status.isChineseRom;
+    final autoStartPending = status.isChineseRom && !(await isAutoStartSet());
+    return !status.allGood || autoStartPending;
   }
 }

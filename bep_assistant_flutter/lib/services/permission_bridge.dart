@@ -44,6 +44,43 @@ class PermissionBridge {
     }
   }
 
+  /// 判断是否为需要手动开"自启动 / 后台运行"的国产 ROM
+  /// （小米 / 华为 / 荣耀 / OPPO / 一加 / realme / vivo / iQOO / 魅族）。
+  ///
+  /// Returns:
+  ///   true 表示应在权限引导中展示"自启动"项；异常时返回 false。
+  static Future<bool> isChineseRom() async {
+    try {
+      final result = await _channel.invokeMethod<bool>('isChineseRom');
+      return result ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 查询是否已获得"闹钟和提醒"（精确闹钟）权限。Android 12 以下恒为 true。
+  ///
+  /// Returns:
+  ///   true 表示可注册精确闹钟；异常时返回 true（避免误报打扰用户）。
+  static Future<bool> canScheduleExactAlarms() async {
+    try {
+      final result = await _channel.invokeMethod<bool>('canScheduleExactAlarms');
+      return result ?? true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// 跳到系统"闹钟和提醒"授权页（失败时兜底应用详情页）。
+  static Future<bool> openExactAlarmSettings() async {
+    try {
+      final result = await _channel.invokeMethod<bool>('openExactAlarmSettings');
+      return result ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// 跳到系统自启动设置页（MIUI/华为/OPPO/vivo 分别有各自 Intent，兜底应用详情页）。
   ///
   /// Returns:
@@ -58,7 +95,7 @@ class PermissionBridge {
     }
   }
 
-  /// 跳到系统电池优化设置页（一律用 ACTION_APPLICATION_DETAILS_SETTINGS 兜底）。
+  /// 请求忽略电池优化：优先弹系统确认框，已豁免或不支持时兜底应用详情页。
   static Future<bool> openBatteryOptimizationSettings() async {
     try {
       final result =

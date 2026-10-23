@@ -3,6 +3,8 @@
 package com.alcyez.bep_assistant
 
 import android.content.Context
+import android.content.pm.ServiceInfo
+import android.os.Build
 import android.util.Log
 import androidx.work.*
 import java.util.concurrent.TimeUnit
@@ -35,6 +37,15 @@ class CheckWorker(
 
         /** WorkManager 唯一任务名，用于 enqueueUniquePeriodicWork 幂等替换 */
         private const val WORK_NAME_POLLING = "polling_check"
+
+        /** 轮询 1 小时后自动取消的唯一任务名 */
+        private const val WORK_NAME_CANCEL_POLLING = "polling_check_cancel"
+
+        /** 前台服务降级用的一次性检查唯一任务名 */
+        private const val WORK_NAME_ONE_TIME = "one_time_check"
+
+        /** 加急任务在 Android 12 以下以前台服务形式运行时使用的通知 ID */
+        private const val FOREGROUND_NOTIFICATION_ID = 1004
 
         // === Go FFI JNI 函数声明 ===
         //
@@ -83,17 +94,74 @@ class CheckWorker(
             )
             Log.i(TAG, "轮询任务已注册（每 20 分钟，最长 1 小时）")
 
-            // 1 小时后自动取消轮询 —— 兜底方案，避免代办审核卡死时用户手机长期轮询
+            // 1 小时后自动取消轮询 —— 兜底方案，避免代办审核卡死时用户手机长期轮询。
+            // 用唯一任务 + REPLACE：重复申请时取消任务的计时随之重置，旧的取消任务不会提前掐掉新轮询。
             val cancelRequest = OneTimeWorkRequestBuilder<CancelPollingWorker>()
                 .setInitialDelay(1, TimeUnit.HOURS)
                 .build()
-            WorkManager.getInstance(context).enqueue(cancelRequest)
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                WORK_NAME_CANCEL_POLLING,
+                ExistingWorkPolicy.REPLACE,
+                cancelRequest
+            )
+        }
+
+        /**
+         * 立即执行一次检查（WorkManager 加急任务），作为前台服务无法启动时的降级通道。
+         *
+         * 使用场景：非精确闹钟触发 / 开机广播等不允许后台启动前台服务的情况。
+         * 加急配额耗尽时自动退化为普通任务（RUN_AS_NON_EXPEDITED_WORK_REQUEST）。
+         * 唯一任务 + KEEP：两次触发撞在一起时只跑一次。
+         * 副作用：向 WorkManager 入队任务（持久化到 WorkManager 自身数据库）。
+         */
+        fun enqueueOneTimeCheck(context: Context) {
+            val request = OneTimeWorkRequestBuilder<CheckWorker>()
+                .addTag(WORK_NAME_ONE_TIME)
+                .setConstraints(
+                    Constraints.Builder()
+                        .setRequiredNetworkType(NetworkType.CONNECTED)
+                        .build()
+                )
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .build()
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                WORK_NAME_ONE_TIME,
+                ExistingWorkPolicy.KEEP,
+                request
+            )
+            Log.i(TAG, "一次性检查任务已入队（expedited）")
         }
 
         /** 取消轮询任务；由 CancelPollingWorker 或 [MainActivity.cancelAllScheduled] 调用 */
         fun cancelPolling(context: Context) {
             WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME_POLLING)
             Log.i(TAG, "轮询任务已取消")
+        }
+
+        /** 取消尚未执行的一次性降级检查任务；删完最后一个账号时调用。 */
+        fun cancelOneTimeCheck(context: Context) {
+            WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME_ONE_TIME)
+        }
+    }
+
+    /**
+     * 加急任务在 Android 12 以下会以前台服务方式运行，WorkManager 需要此通知；
+     * 未实现时 setExpedited 任务在旧系统上会抛 IllegalStateException。
+     *
+     * @return 前台通知信息（Android 10+ 带 dataSync 类型，与 Manifest 中 SystemForegroundService 声明一致）
+     */
+    override suspend fun getForegroundInfo(): ForegroundInfo {
+        NotificationHelper.createChannel(applicationContext)
+        val notification = NotificationHelper.buildNotification(
+            applicationContext, "进京证助手", "正在执行定时检查..."
+        )
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ForegroundInfo(
+                FOREGROUND_NOTIFICATION_ID, notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            ForegroundInfo(FOREGROUND_NOTIFICATION_ID, notification)
         }
     }
 
