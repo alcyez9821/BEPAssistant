@@ -173,7 +173,6 @@ class CheckWorker(
      */
     override suspend fun doWork(): Result {
         Log.i(TAG, "[doWork] start attempt=$runAttemptCount")
-        PollLog.log(applicationContext, "CHECK_START via=WorkManager tags=$tags attempt=$runAttemptCount")
 
         return try {
             val ok = GoBridgeLoader.initIfNeeded(applicationContext) { dbPath -> nativeInit(dbPath) }
@@ -190,10 +189,6 @@ class CheckWorker(
                 CredentialsGateway.applyRefreshedTokens(applicationContext, callbackFile)
             }
             Log.i(TAG, "[doWork] result: $result")
-            PollLog.log(applicationContext, "CHECK_DONE via=WorkManager ${PollLog.summarize(result)}")
-            if (TestMode.SHOW_RESULT_NOTIFICATION && TestMode.isEnabled) {
-                NotificationHelper.notify(applicationContext, "[测试] 后台轮询完成(WM)", PollLog.summarize(result))
-            }
 
             // 派发通知（含 ec_notified_at 去重标记回写）
             NotificationDispatcher.dispatch(
@@ -205,7 +200,6 @@ class CheckWorker(
             Result.success()
         } catch (e: Exception) {
             Log.e(TAG, "[doWork] FAILED", e)
-            PollLog.log(applicationContext, "CHECK_FAILED via=WorkManager ${e.javaClass.simpleName}: ${e.message}")
             // 最多重试 3 次；仍失败时才通知避免网络抖动打扰用户
             if (runAttemptCount < 3) {
                 Result.retry()

@@ -114,7 +114,6 @@ class CheckService : LifecycleService() {
             } catch (e: Exception) {
                 // Android 12+ 后台启动前台服务不被允许时可能在此抛出；降级到 WorkManager，本服务直接退出
                 Log.w(TAG, "[onStartCommand] startForeground 被拒，降级 WorkManager", e)
-                PollLog.log(applicationContext, "FGS_DENIED ${e.javaClass.simpleName} -> WorkManager")
                 CheckWorker.enqueueOneTimeCheck(applicationContext)
                 stopSelf()
                 return START_NOT_STICKY
@@ -126,13 +125,8 @@ class CheckService : LifecycleService() {
         // 后台协程执行检查；lifecycleScope 保证 Service 停止时协程自动取消
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                PollLog.log(applicationContext, "CHECK_START via=CheckService")
                 val result = executeCheck()
                 Log.i(TAG, "[onStartCommand] check result: $result")
-                PollLog.log(applicationContext, "CHECK_DONE via=CheckService ${PollLog.summarize(result)}")
-                if (TestMode.SHOW_RESULT_NOTIFICATION && TestMode.isEnabled) {
-                    NotificationHelper.notify(applicationContext, "[测试] 后台轮询完成", PollLog.summarize(result))
-                }
 
                 // 检查成功，重置失败通知标记 —— 下次失败时能重新通知一次
                 prefs.edit().putBoolean(KEY_FAILURE_NOTIFIED, false).apply()
@@ -152,7 +146,6 @@ class CheckService : LifecycleService() {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "[onStartCommand] check FAILED", e)
-                PollLog.log(applicationContext, "CHECK_FAILED via=CheckService ${e.javaClass.simpleName}: ${e.message}")
                 // 首次失败才通知，避免网络波动重复打扰用户；成功后由 prefs 重置
                 if (!prefs.getBoolean(KEY_FAILURE_NOTIFIED, false)) {
                     NotificationHelper.notify(applicationContext, "定时检查失败", e.message ?: "未知错误，请打开应用检查")

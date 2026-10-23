@@ -49,7 +49,6 @@ class BootReceiver : BroadcastReceiver() {
         if (!handled) return
 
         val appContext = context.applicationContext
-        PollLog.log(appContext, "BOOT_RECEIVER action=$action")
         val pendingResult = goAsync()
         Thread {
             try {
