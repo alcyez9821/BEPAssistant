@@ -163,6 +163,23 @@ class PermissionBridge {
     } catch (_) {}
   }
 
+  /// 确保每日检查闹钟已注册（账号列表非空时立即排期）。
+  ///
+  /// 登录添加账号后调用 —— 在此之前排闹钟只发生在 MainActivity.onCreate，
+  /// 新加的账号要等下一次冷启动才会进入后台检查，表现为"必须打开一次 App 才轮询"。
+  /// Kotlin 侧幂等：已排好且仍在未来的触发时间会原样复用，不会重新随机。
+  ///
+  /// Returns:
+  ///   true 表示闹钟已注册；false 表示 Go 未就绪或无账号（跳过排期）。
+  static Future<bool> ensureScheduled() async {
+    try {
+      final result = await _channel.invokeMethod<bool>('ensureScheduled');
+      return result ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// 撤销所有后台定时任务（AlarmManager 每日闹钟 + WorkManager 轮询）。
   ///
   /// 删完最后一个账号时调用，避免空转前台服务通知继续弹出。

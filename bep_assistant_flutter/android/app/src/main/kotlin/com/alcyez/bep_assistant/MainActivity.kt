@@ -89,6 +89,7 @@ class MainActivity : FlutterActivity() {
                         CheckWorker.schedulePolling(this)
                         result.success(true)
                     }
+                    "ensureScheduled" -> result.success(ensureScheduled())
                     "cancelAllScheduled" -> {
                         // 删完最后一个账号时调用：撤销所有后台定时任务
                         AlarmReceiver.cancelAlarms(this)
@@ -172,6 +173,36 @@ class MainActivity : FlutterActivity() {
         } else {
             AlarmReceiver.cancelAlarms(this)
         }
+    }
+
+    /**
+     * Register the daily check alarms immediately when at least one account exists.
+     *
+     * Flutter calls this after the account list changes (login succeeded, account added or
+     * removed) so the background alarm chain starts without waiting for the next cold start.
+     * Before this entry point existed, [onCreate] was the only place that scheduled alarms:
+     * a freshly added account stayed unscheduled until the user killed and reopened the app,
+     * which looked like "the background check only runs when I open the app".
+     *
+     * Idempotent: [AlarmReceiver.scheduleAlarms] reuses an already persisted future trigger
+     * time instead of re-randomizing it, so calling this next to [onCreate] is harmless.
+     *
+     * @return true when alarms are registered; false when the Go bridge is unavailable or
+     *         there is no account, in which case scheduling is skipped
+     *
+     * Side effects: Go library init, AlarmManager registration, SharedPreferences write,
+     * poll log write. Runs on the platform thread like the scheduling done in [onCreate].
+     */
+    private fun ensureScheduled(): Boolean {
+        val goReady = GoBridgeLoader.initIfNeeded(applicationContext) {
+            CheckService.nativeInit(it)
+        }
+        if (!goReady || !CredentialsGateway.hasAccounts(this)) {
+            android.util.Log.i("MainActivity", "[ensureScheduled] skipped goReady=$goReady")
+            return false
+        }
+        AlarmReceiver.scheduleAlarms(this)
+        return true
     }
 
     /**

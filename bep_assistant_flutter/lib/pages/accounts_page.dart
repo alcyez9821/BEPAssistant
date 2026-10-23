@@ -19,7 +19,8 @@
 //   2. notifications 与 messages 是独立两组，Go 可能同时返回（例如"过期"+"申请已提交"），
 //      本页处理时先派 notifications、再派非重复的 messages，避免同一文案重复通知
 //   3. 删完最后一个账号自动 cancelAllScheduled，避免空转前台服务通知继续弹
-//   4. 排闹钟不在这里 —— 由 MainActivity.onCreate 负责，避免与 initState 并发排 2 次
+//   4. 账号非空时 ensureScheduled 补排每日闹钟 —— 登录添加账号后必须在这里排，
+//      否则新账号要等下次冷启动（MainActivity.onCreate）才进入后台检查
 import 'package:flutter/material.dart';
 import '../models/account.dart';
 import '../services/go_bridge.dart';
@@ -180,12 +181,15 @@ class _AccountsPageState extends State<AccountsPage> {
     );
   }
 
-  /// 加载账号列表。加载完成后如果账号为 0，撤销所有后台定时任务。
+  /// 加载账号列表，并按账号数量同步后台定时任务的开关。
   ///
   /// 关于闹钟排期：
+  ///   有账号 → ensureScheduled 立即确保每日闹钟已注册。登录添加账号后会回到本页刷新，
+  ///   这里补排是新账号进入后台检查的唯一及时入口 —— 只靠 MainActivity.onCreate 的话，
+  ///   新账号要等用户下次冷启动才排上，表现为"必须打开一次 App 才轮询"。
+  ///   Kotlin 侧 scheduleAlarms 幂等（复用已持久化的未来触发时间），与 onCreate 重复
+  ///   调用不会重复随机或重复触发。
   ///   删完最后一个账号 → cancelAllScheduled 避免空转前台服务弹通知。
-  ///   重新排闹钟不在这里 —— 由 MainActivity.onCreate 负责（下次打开 app 时纠正），
-  ///   避免与 onCreate 竞争导致同一次冷启动重复排 2-3 次。
   Future<void> _loadAccounts() async {
     setState(() => _loading = true);
     try {
@@ -196,6 +200,8 @@ class _AccountsPageState extends State<AccountsPage> {
       });
       if (_accounts.isEmpty) {
         await PermissionBridge.cancelAllScheduled();
+      } else {
+        await PermissionBridge.ensureScheduled();
       }
     } catch (e) {
       setState(() => _loading = false);
