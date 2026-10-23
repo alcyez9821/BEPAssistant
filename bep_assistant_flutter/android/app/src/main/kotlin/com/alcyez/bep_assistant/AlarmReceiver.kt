@@ -76,6 +76,19 @@ class AlarmReceiver : BroadcastReceiver() {
          */
         fun scheduleAlarms(context: Context) {
             Log.i(TAG, "[scheduleAlarms] called")
+            if (TestMode.isEnabled) {
+                // 测试模式：只用 FIRST 一个闹钟，每 N 分钟一次；撤掉 SECOND 避免干扰
+                cancelSlot(context, Slot.SECOND)
+                val stored = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                    .getLong(Slot.FIRST.prefKey, 0L)
+                val now = System.currentTimeMillis()
+                val maxAhead = TestMode.INTERVAL_MINUTES * 60_000L
+                // 已存时间仍在未来且不超过一个周期（防止残留正式模式的"明天"时间）则沿用
+                val target = if (stored > now && stored - now <= maxAhead) stored else nextTriggerMillis(Slot.FIRST, now, allowToday = true)
+                registerSlot(context, Slot.FIRST, target)
+                PollLog.log(context, "SCHEDULED test-mode next=${java.util.Date(target)} exact=${canScheduleExact(context)}")
+                return
+            }
             val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
             val now = System.currentTimeMillis()
             for (slot in Slot.values()) {
@@ -92,12 +105,7 @@ class AlarmReceiver : BroadcastReceiver() {
          * 每天弹出"正在执行定时检查..."通知打扰用户。
          */
         fun cancelAlarms(context: Context) {
-            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-            for (slot in Slot.values()) {
-                val pendingIntent = buildPendingIntent(context, slot)
-                alarmManager.cancel(pendingIntent)
-                pendingIntent.cancel()
-            }
+            for (slot in Slot.values()) cancelSlot(context, slot)
             context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit().clear().apply()
             Log.i(TAG, "[cancelAlarms] cancelled all")
         }
@@ -111,6 +119,7 @@ class AlarmReceiver : BroadcastReceiver() {
          * @return 下一次触发时间（epoch millis）
          */
         private fun nextTriggerMillis(slot: Slot, now: Long, allowToday: Boolean): Long {
+            if (TestMode.isEnabled) return now + TestMode.INTERVAL_MINUTES * 60_000L
             val random = Random()
             val cal = Calendar.getInstance().apply {
                 timeInMillis = now
@@ -121,6 +130,14 @@ class AlarmReceiver : BroadcastReceiver() {
             }
             if (!allowToday || cal.timeInMillis <= now) cal.add(Calendar.DAY_OF_MONTH, 1)
             return cal.timeInMillis
+        }
+
+        /** 取消单个时段的闹钟（不清除持久化时间）。 */
+        private fun cancelSlot(context: Context, slot: Slot) {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val pendingIntent = buildPendingIntent(context, slot)
+            alarmManager.cancel(pendingIntent)
+            pendingIntent.cancel()
         }
 
         /** 构造某时段对应的广播 PendingIntent（requestCode + action 区分时段，FLAG_UPDATE_CURRENT 幂等覆盖）。 */
@@ -197,6 +214,7 @@ class AlarmReceiver : BroadcastReceiver() {
                         context.startService(serviceIntent)
                     }
                     Log.i(TAG, "[launchCheck] CheckService started")
+                    PollLog.log(context, "LAUNCH via=CheckService")
                     return
                 } catch (e: IllegalStateException) {
                     Log.w(TAG, "[launchCheck] 前台服务启动被拒，降级 WorkManager", e)
@@ -204,6 +222,7 @@ class AlarmReceiver : BroadcastReceiver() {
                     Log.w(TAG, "[launchCheck] 前台服务启动被拒（权限），降级 WorkManager", e)
                 }
             }
+            PollLog.log(context, "LAUNCH via=WorkManager preferWorker=$preferWorker")
             CheckWorker.enqueueOneTimeCheck(context)
         }
     }
@@ -224,8 +243,12 @@ class AlarmReceiver : BroadcastReceiver() {
             return
         }
 
+        PollLog.log(context, "ALARM_FIRED slot=$slot exact=${canScheduleExact(context)}")
+
         // 第一步就续排，确保后续任何异常都不会让闹钟链断掉
-        registerSlot(context, slot, nextTriggerMillis(slot, System.currentTimeMillis(), allowToday = false))
+        val next = nextTriggerMillis(slot, System.currentTimeMillis(), allowToday = false)
+        registerSlot(context, slot, next)
+        PollLog.log(context, "SCHEDULED slot=$slot next=${java.util.Date(next)}")
 
         val appContext = context.applicationContext
         val pendingResult = goAsync()
@@ -248,6 +271,7 @@ class AlarmReceiver : BroadcastReceiver() {
                 launchCheck(appContext)
             } catch (e: Throwable) {
                 Log.e(TAG, "[onReceive] failed", e)
+                PollLog.log(appContext, "ALARM_ERROR ${e.javaClass.simpleName}: ${e.message}")
             } finally {
                 pendingResult.finish()
             }

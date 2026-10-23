@@ -96,6 +96,7 @@ class MainActivity : FlutterActivity() {
                     "runCheckWithCredentials" -> {
                         // 前台触发一次检查：读密文→解密→调 Go；执行完把新 token 加密回存。
                         // 用 Thread 异步 —— IO + JNI 会阻塞 UI 线程若在此直接调用。
+                        PollLog.log(applicationContext, "MANUAL_CHECK (foreground)")
                         Thread {
                             try {
                                 val ok = GoBridgeLoader.initIfNeeded(applicationContext) {
@@ -138,6 +139,9 @@ class MainActivity : FlutterActivity() {
      */
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // 测试日志：区分"打开 App 触发"与"后台闹钟触发"
+        PollLog.log(applicationContext, "APP_OPEN (foreground, not a background poll)")
 
         // 主动触发 Go 库加载 + 初始化 DB（保证下面 hasAccounts 走 Go FFI）
         GoBridgeLoader.loadLibrary()
