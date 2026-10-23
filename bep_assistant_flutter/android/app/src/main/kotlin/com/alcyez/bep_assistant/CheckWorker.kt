@@ -45,7 +45,7 @@ class CheckWorker(
         private const val WORK_NAME_ONE_TIME = "one_time_check"
 
         /** 加急任务在 Android 12 以下以前台服务形式运行时使用的通知 ID */
-        private const val FOREGROUND_NOTIFICATION_ID = 1004
+        private const val FOREGROUND_NOTIFICATION_ID = NotificationHelper.FOREGROUND_ID_WORKER
 
         // === Go FFI JNI 函数声明 ===
         //

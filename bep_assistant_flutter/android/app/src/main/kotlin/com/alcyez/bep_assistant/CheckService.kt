@@ -109,8 +109,8 @@ class CheckService : LifecycleService() {
         val fgNotification = NotificationHelper.buildNotification(this, "进京证助手", "正在执行定时检查...")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {
-                startForeground(1003, fgNotification)
-                Log.i(TAG, "[onStartCommand] startForeground 1003")
+                startForeground(NotificationHelper.FOREGROUND_ID_SERVICE, fgNotification)
+                Log.i(TAG, "[onStartCommand] startForeground ${NotificationHelper.FOREGROUND_ID_SERVICE}")
             } catch (e: Exception) {
                 // Android 12+ 后台启动前台服务不被允许时可能在此抛出；降级到 WorkManager，本服务直接退出
                 Log.w(TAG, "[onStartCommand] startForeground 被拒，降级 WorkManager", e)

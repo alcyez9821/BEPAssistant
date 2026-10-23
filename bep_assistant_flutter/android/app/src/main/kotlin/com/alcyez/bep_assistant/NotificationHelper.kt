@@ -46,8 +46,20 @@ object NotificationHelper {
     /** SharedPreferences key：累计错过的通知数 */
     private const val KEY_MISSED_COUNT = "missed_notifications"
 
-    /** 通知 ID 计数器，起始 1000 避免与 CheckService 的 1003 前台通知冲突 */
-    private val idCounter = java.util.concurrent.atomic.AtomicInteger(1000)
+    /** [CheckService] 前台通知 ID —— 与本文件 [idCounter] 的区间互斥 */
+    const val FOREGROUND_ID_SERVICE = 1003
+
+    /** [CheckWorker] 前台通知 ID —— 与本文件 [idCounter] 的区间互斥 */
+    const val FOREGROUND_ID_WORKER = 1004
+
+    /**
+     * 通知 ID 计数器。
+     *
+     * 必须从 2000 起，避开前台服务占用的 ID：CheckService=1003、CheckWorker=1004。
+     * 之前从 1000 起，同一进程内第 3 条通知会拿到 1003，替换掉前台通知，随后 stopSelf
+     * 移除前台通知时这条业务通知被一起清掉（用户表现为"少收到一条通知"）。
+     */
+    private val idCounter = java.util.concurrent.atomic.AtomicInteger(2000)
 
     /**
      * 创建通知渠道 —— Android 8+ 才需要，之前版本静默跳过。幂等，多次调用不会重复创建。
