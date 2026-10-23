@@ -59,6 +59,18 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "isMiuiDevice" -> result.success(isMiuiDevice())
+                    // 【测试】诊断页：调度状态 + 轮询日志 + 1 分钟后触发测试闹钟
+                    "debugPollState" -> result.success(
+                        "=== 调度状态 ===\n" + AlarmReceiver.debugState(this) +
+                            "电池优化豁免=${isBatteryOptimizationExempt()}\n" +
+                            "通知开启=${androidx.core.app.NotificationManagerCompat.from(this).areNotificationsEnabled()}\n" +
+                            "=== 轮询日志(最近200行) ===\n" + PollLog.readTail(this)
+                    )
+                    "scheduleTestAlarm" -> {
+                        val seconds = call.argument<Int>("seconds") ?: 60
+                        AlarmReceiver.scheduleTestAlarmIn(this, seconds * 1000L)
+                        result.success(true)
+                    }
                     "isChineseRom" -> result.success(isChineseRom())
                     "canScheduleExactAlarms" -> result.success(AlarmReceiver.canScheduleExact(this))
                     "openExactAlarmSettings" -> openExactAlarmSettings(result)

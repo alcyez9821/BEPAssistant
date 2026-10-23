@@ -132,6 +132,44 @@ class AlarmReceiver : BroadcastReceiver() {
             return cal.timeInMillis
         }
 
+        /**
+         * 【测试】[delayMs] 毫秒后触发一次 FIRST 闹钟（覆盖当前已排时间），用于在云真机上快速验证后台链路。
+         * 副作用：AlarmManager 注册、写 SharedPreferences、写轮询日志。
+         */
+        fun scheduleTestAlarmIn(context: Context, delayMs: Long) {
+            val target = System.currentTimeMillis() + delayMs
+            registerSlot(context, Slot.FIRST, target)
+            PollLog.log(context, "SCHEDULED manual-test next=${java.util.Date(target)} exact=${canScheduleExact(context)}")
+        }
+
+        /**
+         * 【测试】导出闹钟调度状态，供诊断页展示。
+         *
+         * pendingIntentAlive=false 而 next 有值，说明闹钟已被系统清除（如应用被强行停止 ——
+         * Android 15+ 强行停止会取消该应用全部 PendingIntent）。
+         *
+         * @return 多行文本
+         */
+        fun debugState(context: Context): String {
+            val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            val sb = StringBuilder()
+            for (slot in Slot.values()) {
+                val next = prefs.getLong(slot.prefKey, 0L)
+                val intent = Intent(context, AlarmReceiver::class.java).apply { action = slot.action }
+                val alive = PendingIntent.getBroadcast(
+                    context, slot.requestCode, intent,
+                    PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+                ) != null
+                sb.append("$slot next=${if (next > 0) java.util.Date(next) else "-"} pendingIntentAlive=$alive\n")
+            }
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val clock = alarmManager.nextAlarmClock
+            val clockOwner = clock?.showIntent?.creatorPackage
+            sb.append("系统下一个闹钟(AlarmClock)=${clock?.let { java.util.Date(it.triggerTime) } ?: "-"} owner=$clockOwner\n")
+            sb.append("canScheduleExact=${canScheduleExact(context)}\n")
+            return sb.toString()
+        }
+
         /** 取消单个时段的闹钟（不清除持久化时间）。 */
         private fun cancelSlot(context: Context, slot: Slot) {
             val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager

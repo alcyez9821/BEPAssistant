@@ -69,6 +69,18 @@ object PollLog {
         }
     }
 
+    /**
+     * 读取轮询日志文件最后 [maxLines] 行（供 App 内诊断页展示，不依赖 logcat）。
+     *
+     * @return 日志文本；文件不存在时返回提示文字
+     */
+    fun readTail(context: Context, maxLines: Int = 200): String {
+        val dir = context.getExternalFilesDir(null) ?: context.filesDir
+        val file = File(dir, FILE_NAME)
+        if (!file.exists()) return "(尚无轮询日志：${file.absolutePath})"
+        return file.readLines().takeLast(maxLines).joinToString("\n")
+    }
+
     /** 从 Go 返回的 TaskResult JSON 中提取摘要字段，避免把账号 / 车辆细节打到日志里。 */
     fun summarize(resultJson: String): String = try {
         val o = org.json.JSONObject(resultJson)
