@@ -34,7 +34,7 @@ class SettingsPage extends StatelessWidget {
           ListTile(
             leading: const Icon(Icons.security),
             title: const Text('检查应用权限'),
-            subtitle: const Text('通知、电池优化、自启动'),
+            subtitle: const Text('通知、闹钟和提醒、电池优化、自启动、后台高耗电'),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => showDialog(
               context: context,

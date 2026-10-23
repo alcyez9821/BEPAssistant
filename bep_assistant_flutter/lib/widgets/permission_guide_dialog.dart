@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 //
 // File: widgets/permission_guide_dialog.dart
-// Purpose: 权限引导对话框 —— 通知 / 闹钟和提醒 / 电池优化 / 自启动 四个权限项的可视化引导。
+// Purpose: 权限引导对话框 —— 通知 / 闹钟和提醒 / 电池优化 / 自启动 / vivo 后台高耗电 的可视化引导。
 // Author: alcyez (AI Agent 辅助生成注释)
 // Created: 2026-07-06
 //
@@ -35,6 +35,8 @@ class _PermissionGuideDialogState extends State<PermissionGuideDialog>
   bool _exactAlarmGranted = true;
   bool _isChineseRom = false;
   bool _autoStartSet = false;
+  bool _isVivo = false;
+  bool _bgPowerSet = false;
   bool _loading = true;
 
   @override
@@ -63,6 +65,8 @@ class _PermissionGuideDialogState extends State<PermissionGuideDialog>
   Future<void> _checkPermissions() async {
     final result = await PermissionService.checkAll();
     final autoStartSet = await PermissionService.isAutoStartSet();
+    final isVivo = await PermissionBridge.isVivoDevice();
+    final bgPowerSet = await PermissionService.isBackgroundPowerSet();
     if (mounted) {
       setState(() {
         _notifGranted = result.notificationGranted;
@@ -70,6 +74,8 @@ class _PermissionGuideDialogState extends State<PermissionGuideDialog>
         _exactAlarmGranted = result.exactAlarmGranted;
         _isChineseRom = result.isChineseRom;
         _autoStartSet = autoStartSet;
+        _isVivo = isVivo;
+        _bgPowerSet = bgPowerSet;
         _loading = false;
       });
     }
@@ -97,6 +103,10 @@ class _PermissionGuideDialogState extends State<PermissionGuideDialog>
                   if (_isChineseRom) ...[
                     const SizedBox(height: 12),
                     _buildAutoStartItem(),
+                  ],
+                  if (_isVivo) ...[
+                    const SizedBox(height: 12),
+                    _buildBackgroundPowerItem(),
                   ],
                 ],
               ),
@@ -162,7 +172,7 @@ class _PermissionGuideDialogState extends State<PermissionGuideDialog>
       icon: _batteryExempt ? Icons.check_circle : Icons.warning_amber,
       iconColor: _batteryExempt ? Colors.green : Colors.orange,
       title: '电池优化',
-      subtitle: '将应用从电池优化列表移除（vivo：电池 → 后台耗电管理 → 允许后台高耗电）',
+      subtitle: '将应用从系统电池优化列表移除，确保定时检查正常运行',
       status: _batteryExempt ? '已设为无限制' : '未设置',
       statusColor: _batteryExempt ? Colors.green : Colors.red,
       actionLabel: _batteryExempt ? null : '去设置',
@@ -201,6 +211,34 @@ class _PermissionGuideDialogState extends State<PermissionGuideDialog>
           ? null
           : () async {
               await PermissionService.markAutoStartSet();
+              _checkPermissions();
+            },
+    );
+  }
+
+  /// vivo"后台高耗电"项 —— vivo 专属，仅在 [_isVivo] 为 true 时显示。
+  ///
+  /// 与标准"电池优化"是两套独立开关：vivo 的后台功耗管控会冻结 / 清理后台耗电的应用，
+  /// 无公开 API 可查询状态，因此同自启动一样采用"去设置 + 我已设置"双按钮软标记。
+  Widget _buildBackgroundPowerItem() {
+    return _buildPermissionItem(
+      icon: _bgPowerSet ? Icons.check_circle : Icons.warning_amber,
+      iconColor: _bgPowerSet ? Colors.green : Colors.orange,
+      title: '后台高耗电',
+      subtitle: '电池 → 后台耗电管理 → 进京证助手 → 允许后台高耗电，否则后台检查可能被系统冻结',
+      status: _bgPowerSet ? '已设置' : '未设置',
+      statusColor: _bgPowerSet ? Colors.green : Colors.red,
+      actionLabel: _bgPowerSet ? null : '去设置',
+      onPressed: _bgPowerSet
+          ? null
+          : () {
+              PermissionBridge.openBackgroundPowerSettings();
+            },
+      confirmLabel: _bgPowerSet ? null : '我已设置',
+      onConfirm: _bgPowerSet
+          ? null
+          : () async {
+              await PermissionService.markBackgroundPowerSet();
               _checkPermissions();
             },
     );

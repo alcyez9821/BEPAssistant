@@ -75,6 +75,8 @@ class MainActivity : FlutterActivity() {
                     "canScheduleExactAlarms" -> result.success(AlarmReceiver.canScheduleExact(this))
                     "openExactAlarmSettings" -> openExactAlarmSettings(result)
                     "openAutoStartSettings" -> openAutoStartSettings(result)
+                    "isVivoDevice" -> result.success(isVivoDevice())
+                    "openBackgroundPowerSettings" -> openBackgroundPowerSettings(result)
                     "openBatteryOptimizationSettings" -> openBatteryOptimizationSettings(result)
                     "isBatteryOptimizationExempt" -> result.success(isBatteryOptimizationExempt())
                     "sendNotification" -> {
@@ -200,6 +202,39 @@ class MainActivity : FlutterActivity() {
             "realme", "vivo", "iqoo", "meizu"
         )
         return tokens.any { token -> vendors.any { token.contains(it) } }
+    }
+
+    /** 是否为 vivo / iQOO 设备（OriginOS / Funtouch OS）。 */
+    private fun isVivoDevice(): Boolean {
+        val tokens = listOf(Build.MANUFACTURER, Build.BRAND).map { it.lowercase() }
+        return tokens.any { it.contains("vivo") || it.contains("iqoo") }
+    }
+
+    /**
+     * 跳到 vivo"后台耗电管理"页，让用户把本应用设为"允许后台高耗电"。
+     *
+     * vivo 在标准电池优化之外另有一套后台功耗管控（com.iqoo.powersaving）：未允许后台高耗电的
+     * 应用在后台持续耗电时会被系统冻结或清理，导致定时检查不执行。该开关没有公开 API 可查询。
+     * 组件名取自 OriginOS（Android 17，PD2502）实机日志，按新到旧逐个尝试；全部失败时兜底应用详情页
+     * （用户可从"电池"子项进入）。
+     */
+    private fun openBackgroundPowerSettings(result: MethodChannel.Result) {
+        val candidates = listOf(
+            ComponentName("com.iqoo.powersaving", "com.iqoo.powersaving.activity.ExcessivePowerManagerActivity"),
+            ComponentName("com.iqoo.powersaving", "com.iqoo.powersaving.PowerSavingManagerActivity"),
+            ComponentName("com.vivo.abe", "com.vivo.applicationbehaviorengine.ui.ExcessivePowerManagerActivity"),
+        )
+        for (component in candidates) {
+            try {
+                startActivity(Intent().apply {
+                    this.component = component
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                })
+                result.success(true)
+                return
+            } catch (_: Exception) { }
+        }
+        openAppDetails(result)
     }
 
     /**

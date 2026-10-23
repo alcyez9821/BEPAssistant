@@ -61,6 +61,9 @@ class PermissionService {
   /// SharedPreferences key：用户是否手动设置过 MIUI 自启动。
   static const _autoStartSetKey = 'permission_autostart_set';
 
+  /// SharedPreferences key：用户是否确认已在 vivo 开启"允许后台高耗电"（无 API 可查，只能软标记）。
+  static const _bgPowerSetKey = 'permission_bg_power_set';
+
   /// 一次性获取三个权限状态。
   ///
   /// 电池优化判断复合：系统 API + 用户手动标记；任一为 true 即认为已授权。
@@ -132,11 +135,24 @@ class PermissionService {
     return prefs.getBool(_autoStartSetKey) ?? false;
   }
 
+  /// 标记用户已在 vivo 开启"允许后台高耗电"。用户在权限对话框点"我已设置"时调用。
+  static Future<void> markBackgroundPowerSet() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_bgPowerSetKey, true);
+  }
+
+  /// 用户是否已确认开启 vivo"允许后台高耗电"。
+  static Future<bool> isBackgroundPowerSet() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_bgPowerSetKey) ?? false;
+  }
+
   /// 是否需要在启动时弹权限引导对话框。
   ///
   /// 逻辑：
   ///   - 用户点过"不再提醒"→ 不弹
-  ///   - 否则：任一权限未到位，或是国产 ROM 且用户未确认已开自启动 → 弹
+  ///   - 否则：任一权限未到位，或是国产 ROM 且用户未确认已开自启动，
+  ///     或是 vivo 且用户未确认已开"允许后台高耗电" → 弹
   ///
   /// Returns:
   ///   true 表示应弹出。
@@ -146,6 +162,8 @@ class PermissionService {
 
     final status = await checkAll();
     final autoStartPending = status.isChineseRom && !(await isAutoStartSet());
-    return !status.allGood || autoStartPending;
+    final bgPowerPending =
+        await PermissionBridge.isVivoDevice() && !(await isBackgroundPowerSet());
+    return !status.allGood || autoStartPending || bgPowerPending;
   }
 }

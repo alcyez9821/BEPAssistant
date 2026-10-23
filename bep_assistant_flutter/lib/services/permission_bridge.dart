@@ -58,6 +58,27 @@ class PermissionBridge {
     }
   }
 
+  /// 是否为 vivo / iQOO 设备；决定是否展示"后台高耗电"引导项。异常时返回 false。
+  static Future<bool> isVivoDevice() async {
+    try {
+      final result = await _channel.invokeMethod<bool>('isVivoDevice');
+      return result ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 跳到 vivo"后台耗电管理"页（允许后台高耗电），失败时兜底应用详情页。
+  static Future<bool> openBackgroundPowerSettings() async {
+    try {
+      final result =
+          await _channel.invokeMethod<bool>('openBackgroundPowerSettings');
+      return result ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// 查询是否已获得"闹钟和提醒"（精确闹钟）权限。Android 12 以下恒为 true。
   ///
   /// Returns:
