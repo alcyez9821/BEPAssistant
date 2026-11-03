@@ -75,6 +75,9 @@ type DriverInfo struct {
 	Jsrxm string `json:"jsrxm"` // 驾驶人姓名
 	Jszh  string `json:"jszh"`  // 驾驶证号
 	Dabh  string `json:"dabh"`  // 档案编号
+	// Rylx 人员类型："0"=普通，"1"=港澳台及外籍人士。H5 用 String(rylx) 读取，
+	// 服务端可能返回 string 或 number，故用 interface{} 接收。
+	Rylx interface{} `json:"rylx"`
 }
 
 // HandleData 可选进京日期数据（checkHandle 接口的 data 部分）。

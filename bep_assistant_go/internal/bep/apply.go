@@ -165,6 +165,7 @@ func (c *Client) ApplyForPermit(token string, opts ApplyOptions) (*APIResponse, 
 		"jsrxm":    jsrxx.Jsrxm,
 		"jszh":     jsrxx.Jszh,
 		"dabh":     jsrxx.Dabh,
+		"rylx":     rylxOf(jsrxx),
 		"txrxx":    []string{},
 		"jjrq":     jjrq,
 		"area":     opts.Area,
@@ -203,11 +204,23 @@ func (c *Client) applyCheckNum(token string, jsrxx *DriverInfo) error {
 		"jsrxm": jsrxx.Jsrxm,
 		"jszh":  jsrxx.Jszh,
 		"dabh":  jsrxx.Dabh,
+		"rylx":  rylxOf(jsrxx),
 		"txrxx": []string{},
 		"txrkg": "0",
 		"wtxr":  "",
 	}
 	return c.Post("/pro//applyRecordController/applyCheckNum", body, token, nil)
+}
+
+// rylxOf 返回驾驶人员类型，供 applyCheckNum / insertApplyRecord 请求体使用。
+//
+// getJsrxx 返回 rylx 为 "1"（字符串或数字）时视为港澳台及外籍人士返回 "1"，
+// 其余情况（含缺失、nil）一律按普通人员返回 "0"，与 H5 前端行为一致。
+func rylxOf(d *DriverInfo) string {
+	if d != nil && d.Rylx != nil && fmt.Sprint(d.Rylx) == "1" {
+		return "1"
+	}
+	return "0"
 }
 
 // checkInputRoadInfo Step 4：是否需要填写行驶路线。
